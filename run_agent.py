@@ -5747,6 +5747,25 @@ class AIAgent:
         except Exception:
             pass
 
+    def _build_external_memory_context_for_turn(self, query: Any) -> str:
+        """Build one fenced external-memory recall block for the current turn.
+
+        External memory recall is API-call-time context: it should inform the
+        model for this turn, but it must not be persisted into the transcript or
+        mutate the cached system prompt.  Provider failures are intentionally
+        best-effort so a stale or offline memory backend never blocks chat.
+        """
+        if not (self._memory_manager and isinstance(query, str) and query.strip()):
+            return ""
+        try:
+            raw = self._memory_manager.prefetch_all(
+                query,
+                session_id=self.session_id or "",
+            )
+            return build_memory_context_block(raw)
+        except Exception:
+            return ""
+
     def release_clients(self) -> None:
         """Release LLM client resources WITHOUT tearing down session tool state.
 
@@ -12211,18 +12230,14 @@ class AIAgent:
             except Exception:
                 pass
 
-        # External memory provider: prefetch once before the tool loop.
-        # Reuse the cached result on every iteration to avoid re-calling
-        # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
+        # External memory provider: build one fenced recall block before the
+        # tool loop. Reuse it on every API attempt to avoid re-calling
+        # prefetch_all() during tool loops or retry cycles.
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
-        _ext_prefetch_cache = ""
-        if self._memory_manager:
-            try:
-                _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
-            except Exception:
-                pass
+        _ext_memory_context = self._build_external_memory_context_for_turn(
+            original_user_message
+        )
 
         # Optional opt-in runtime: if api_mode == codex_app_server, hand the
         # turn to the codex app-server subprocess (terminal/file ops/patching
@@ -12393,10 +12408,8 @@ class AIAgent:
                 # never mutated, so nothing leaks into session persistence.
                 if idx == current_turn_user_idx and msg.get("role") == "user":
                     _injections = []
-                    if _ext_prefetch_cache:
-                        _fenced = build_memory_context_block(_ext_prefetch_cache)
-                        if _fenced:
-                            _injections.append(_fenced)
+                    if _ext_memory_context:
+                        _injections.append(_ext_memory_context)
                     if _plugin_user_context:
                         _injections.append(_plugin_user_context)
                     if _injections:

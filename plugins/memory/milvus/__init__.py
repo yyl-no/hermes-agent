@@ -117,17 +117,26 @@ class MilvusMemoryProvider(MemoryProvider):
         self._start_worker()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not query or not self._store:
+        if not query or not query.strip() or not self._store:
             return ""
         try:
+            include_types = self._config.include_types if self._config else None
+            if not include_types:
+                include_types = ["curated_memory", "turn", "summary"]
             results = self._store.search(
                 query,
                 top_k=self._config.top_k if self._config else 8,
-                include_types=(self._config.include_types if self._config else None),
+                include_types=include_types,
             )
             rendered = self._render_results(results)
             with self._lock:
                 self._last_prefetch = rendered
+            logger.debug(
+                "Milvus prefetch query chars=%d results=%d context chars=%d",
+                len(query),
+                len(results),
+                len(rendered),
+            )
             return rendered
         except Exception as exc:
             logger.debug("Milvus prefetch failed: %s", exc, exc_info=True)
@@ -367,19 +376,34 @@ class MilvusMemoryProvider(MemoryProvider):
         if not results:
             return ""
         max_chars = self._config.max_chars if self._config else 3000
+        per_result_chars = min(700, max(120, max_chars // 2))
         parts = ["Milvus recalled memory:"]
         used = len(parts[0])
-        for idx, result in enumerate(results, 1):
+        seen: set[str] = set()
+        rendered_count = 0
+        sorted_results = sorted(results, key=lambda r: r.score, reverse=True)
+        for result in sorted_results:
             text = sanitize_context(result.text).strip()
             if not text:
                 continue
+            normalized = " ".join(text.lower().split())
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            if len(text) > per_result_chars:
+                text = text[: per_result_chars - 3].rstrip() + "..."
             meta = result.metadata
+            rendered_count += 1
             header = (
-                f"{idx}. [{meta.get('memory_type', 'memory')}, "
+                f"{rendered_count}. [{meta.get('memory_type', 'memory')}, "
                 f"score={result.score:.2f}, source={meta.get('source', 'unknown')}]"
             )
+            session_id = meta.get("session_id")
+            if session_id:
+                header = header[:-1] + f", session={session_id}]"
             block = f"{header}\n   {text}"
             if used + len(block) > max_chars:
+                rendered_count -= 1
                 break
             parts.append(block)
             used += len(block)
