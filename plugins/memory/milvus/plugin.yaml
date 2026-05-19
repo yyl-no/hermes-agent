@@ -1,0 +1,5 @@
+name: milvus
+description: Milvus vector memory provider for Hermes.
+version: 0.1.0
+kind: memory-provider
+
