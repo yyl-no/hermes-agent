@@ -99,6 +99,7 @@ pty = [
   "pywinpty==2.0.15; sys_platform == 'win32'",
 ]
 honcho = ["honcho-ai==2.0.1"]
+milvus = ["pymilvus==3.0.0"]
 mcp = ["mcp==1.26.0"]
 homeassistant = ["aiohttp==3.13.3"]
 sms = ["aiohttp==3.13.3"]
@@ -201,6 +202,7 @@ all = [
   "hermes-agent[dev]",
   "hermes-agent[pty]",
   "hermes-agent[mcp]",
+  "hermes-agent[milvus]",
   "hermes-agent[homeassistant]",
   "hermes-agent[sms]",
   "hermes-agent[acp]",
