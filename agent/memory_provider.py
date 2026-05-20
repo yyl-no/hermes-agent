@@ -277,3 +277,29 @@ class MemoryProvider(ABC):
 
         Use to mirror built-in memory writes to your backend.
         """
+
+    def write_memory(
+        self,
+        action: str,
+        target: str,
+        content: str = "",
+        *,
+        old_text: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Write durable memory directly to this provider.
+
+        Used by exclusive external-memory modes where the built-in Markdown
+        store is no longer the write target. Return a JSON string compatible
+        with tool results.
+        """
+        raise NotImplementedError(f"Provider {self.name} does not support direct memory writes")
+
+    def build_stable_memory_block(self, max_chars: int = 3000) -> str:
+        """Return stable long-term memory for system-prompt injection.
+
+        Providers may override this in exclusive mode to replace Markdown
+        MEMORY.md / USER.md prompt blocks. Return empty string when no stable
+        block is available.
+        """
+        return ""

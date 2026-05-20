@@ -1105,10 +1105,14 @@ DEFAULT_CONFIG = {
         #   mirror  = built-in memory remains primary; provider is additive
         #   hybrid  = built-in memory + provider recall both active
         #   primary = provider recall is the main read path; built-in remains fallback
+        #   exclusive = provider is the long-term memory read/write path
         "mode": "mirror",
         # Keep writing built-in Markdown memory while external providers mirror writes.
         # Stage 3 keeps this true so users can always fall back to official memory.
         "markdown_mirror": True,
+        # In exclusive mode, fall back to Markdown memory if the external
+        # provider is unavailable instead of preventing the agent from starting.
+        "fallback_to_markdown": True,
     },
 
     # Subagent delegation — override the provider:model used by delegate_task

@@ -1967,16 +1967,23 @@ class AIAgent:
         self._memory_store = None
         self._memory_enabled = False
         self._user_profile_enabled = False
+        self._memory_provider_mode = "mirror"
+        self._memory_markdown_mirror = True
+        self._memory_fallback_to_markdown = True
         self._memory_nudge_interval = 10
         self._turns_since_memory = 0
         self._iters_since_skill = 0
         if not skip_memory:
             try:
                 mem_config = _agent_cfg.get("memory", {})
+                self._memory_provider_mode = str(mem_config.get("mode", "mirror") or "mirror").lower()
+                self._memory_markdown_mirror = bool(mem_config.get("markdown_mirror", True))
+                self._memory_fallback_to_markdown = bool(mem_config.get("fallback_to_markdown", True))
                 self._memory_enabled = mem_config.get("memory_enabled", False)
                 self._user_profile_enabled = mem_config.get("user_profile_enabled", False)
                 self._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
-                if self._memory_enabled or self._user_profile_enabled:
+                _use_markdown_memory = self._memory_provider_mode != "exclusive" or self._memory_fallback_to_markdown
+                if _use_markdown_memory and (self._memory_enabled or self._user_profile_enabled):
                     from tools.memory_tool import MemoryStore
                     self._memory_store = MemoryStore(
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
@@ -2008,8 +2015,8 @@ class AIAgent:
                             "platform": platform or "cli",
                             "hermes_home": str(get_hermes_home()),
                             "agent_context": "primary",
-                            "memory_mode": mem_config.get("mode", "mirror"),
-                            "markdown_mirror": mem_config.get("markdown_mirror", True),
+                            "memory_mode": self._memory_provider_mode,
+                            "markdown_mirror": self._memory_markdown_mirror,
                         }
                         # Thread session title for memory provider scoping
                         # (e.g. honcho uses this to derive chat-scoped session keys)
@@ -4474,6 +4481,55 @@ class AIAgent:
             metadata["tool_call_id"] = tool_call_id
         return {k: v for k, v in metadata.items() if v not in {None, ""}}
 
+    def _external_memory_exclusive_active(self) -> bool:
+        return (
+            getattr(self, "_memory_provider_mode", "mirror") == "exclusive"
+            and bool(getattr(self, "_memory_manager", None))
+        )
+
+    def _handle_memory_tool_call(
+        self,
+        function_args: Dict[str, Any],
+        *,
+        effective_task_id: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+    ) -> str:
+        target = function_args.get("target", "memory")
+        action = function_args.get("action")
+        metadata = self._build_memory_write_metadata(
+            task_id=effective_task_id,
+            tool_call_id=tool_call_id,
+        )
+        if self._external_memory_exclusive_active():
+            return self._memory_manager.write_memory(
+                action or "",
+                target,
+                function_args.get("content") or "",
+                old_text=function_args.get("old_text") or "",
+                metadata=metadata,
+            )
+
+        from tools.memory_tool import memory_tool as _memory_tool
+        result = _memory_tool(
+            action=action,
+            target=target,
+            content=function_args.get("content"),
+            old_text=function_args.get("old_text"),
+            store=self._memory_store,
+        )
+        # Bridge: notify external memory provider of built-in memory writes
+        if self._memory_manager and action in {"add", "replace"}:
+            try:
+                self._memory_manager.on_memory_write(
+                    action or "",
+                    target,
+                    function_args.get("content", ""),
+                    metadata=metadata,
+                )
+            except Exception:
+                pass
+        return result
+
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
 
@@ -6088,7 +6144,7 @@ class AIAgent:
         # ── Volatile tier (changes per session/turn — never cached) ───
         volatile_parts: List[str] = []
 
-        if self._memory_store:
+        if self._memory_store and not self._external_memory_exclusive_active():
             if self._memory_enabled:
                 mem_block = self._memory_store.format_for_system_prompt("memory")
                 if mem_block:
@@ -6102,7 +6158,10 @@ class AIAgent:
         # External memory provider system prompt block (additive to built-in)
         if self._memory_manager:
             try:
-                _ext_mem_block = self._memory_manager.build_system_prompt()
+                if self._external_memory_exclusive_active():
+                    _ext_mem_block = self._memory_manager.build_stable_memory_block()
+                else:
+                    _ext_mem_block = self._memory_manager.build_system_prompt()
                 if _ext_mem_block:
                     volatile_parts.append(_ext_mem_block)
             except Exception:
@@ -10670,30 +10729,11 @@ class AIAgent:
                 current_session_id=self.session_id,
             )
         elif function_name == "memory":
-            target = function_args.get("target", "memory")
-            from tools.memory_tool import memory_tool as _memory_tool
-            result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
-                store=self._memory_store,
+            return self._handle_memory_tool_call(
+                function_args,
+                effective_task_id=effective_task_id,
+                tool_call_id=tool_call_id,
             )
-            # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in {"add", "replace"}:
-                try:
-                    self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                        metadata=self._build_memory_write_metadata(
-                            task_id=effective_task_id,
-                            tool_call_id=tool_call_id,
-                        ),
-                    )
-                except Exception:
-                    pass
-            return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
             return self._memory_manager.handle_tool_call(function_name, function_args)
         elif function_name == "clarify":
@@ -11309,29 +11349,11 @@ class AIAgent:
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
             elif function_name == "memory":
-                target = function_args.get("target", "memory")
-                from tools.memory_tool import memory_tool as _memory_tool
-                function_result = _memory_tool(
-                    action=function_args.get("action"),
-                    target=target,
-                    content=function_args.get("content"),
-                    old_text=function_args.get("old_text"),
-                    store=self._memory_store,
+                function_result = self._handle_memory_tool_call(
+                    function_args,
+                    effective_task_id=effective_task_id,
+                    tool_call_id=getattr(tool_call, "id", None),
                 )
-                # Bridge: notify external memory provider of built-in memory writes
-                if self._memory_manager and function_args.get("action") in {"add", "replace"}:
-                    try:
-                        self._memory_manager.on_memory_write(
-                            function_args.get("action", ""),
-                            target,
-                            function_args.get("content", ""),
-                            metadata=self._build_memory_write_metadata(
-                                task_id=effective_task_id,
-                                tool_call_id=getattr(tool_call, "id", None),
-                            ),
-                        )
-                    except Exception:
-                        pass
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")

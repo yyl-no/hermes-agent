@@ -123,6 +123,76 @@ class MilvusMemoryStore:
             results.append(SearchResult(text=text, score=score, metadata=entity))
         return results
 
+    def list_records(
+        self,
+        *,
+        include_types: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[SearchResult]:
+        if not self._initialized:
+            self.initialize()
+        limit = max(1, min(int(limit or 50), 200))
+        filters = []
+        if include_types:
+            quoted = ", ".join(f'"{_escape_filter(t)}"' for t in include_types)
+            filters.append(f"memory_type in [{quoted}]")
+        filter_expr = " and ".join(filters) if filters else ""
+        client = self.client_wrapper.connect()
+        query = getattr(client, "query", None)
+        if not callable(query):
+            return []
+        kwargs: dict[str, Any] = {
+            "collection_name": self.config.collection,
+            "filter": filter_expr or 'id >= 0',
+            "output_fields": ["*"],
+            "limit": limit,
+        }
+        try:
+            raw = query(**kwargs)
+        except TypeError:
+            raw = query(
+                collection_name=self.config.collection,
+                filter=kwargs["filter"],
+                output_fields=kwargs["output_fields"],
+                limit=limit,
+            )
+        results: list[SearchResult] = []
+        for entity in raw or []:
+            data = dict(entity or {})
+            text = str(data.get(TEXT_FIELD) or "")
+            if text:
+                results.append(SearchResult(text=text, score=1.0, metadata=data))
+        results.sort(key=lambda r: int(r.metadata.get("updated_at") or r.metadata.get("created_at") or 0), reverse=True)
+        return results
+
+    def delete_by_text(
+        self,
+        old_text: str,
+        *,
+        include_types: list[str] | None = None,
+        limit: int = 20,
+    ) -> int:
+        if not old_text or not old_text.strip():
+            return 0
+        matches = [
+            r for r in self.search(old_text, top_k=limit, include_types=include_types)
+            if old_text in r.text
+        ]
+        ids = [r.metadata.get("id") for r in matches if r.metadata.get("id") is not None]
+        if not ids:
+            return 0
+        client = self.client_wrapper.connect()
+        delete = getattr(client, "delete", None)
+        if not callable(delete):
+            return 0
+        try:
+            delete(collection_name=self.config.collection, ids=ids)
+        except TypeError:
+            delete(self.config.collection, ids)
+        _safe_flush(client, self.config.collection)
+        _safe_load_collection(client, self.config.collection)
+        return len(ids)
+
 
 def _json_string(value: Any) -> str:
     if isinstance(value, str):

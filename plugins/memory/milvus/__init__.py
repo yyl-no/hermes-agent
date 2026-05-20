@@ -36,6 +36,21 @@ def _as_bool(value: Any, default: bool = True) -> bool:
     return bool(value)
 
 
+def _split_markdown_entries(text: str) -> list[str]:
+    if not text or not text.strip():
+        return []
+    has_delimiter = "\n§\n" in text
+    chunks = text.split("\n§\n") if has_delimiter else text.splitlines()
+    entries: list[str] = []
+    for chunk in chunks:
+        item = chunk.strip()
+        if item.startswith(("-", "*")):
+            item = item[1:].strip()
+        if item and item != "§" and not item.startswith("#"):
+            entries.append(item)
+    return entries
+
+
 SEARCH_SCHEMA = {
     "name": "milvus_search",
     "description": "Search Milvus long-term memory by semantic similarity.",
@@ -221,6 +236,187 @@ class MilvusMemoryProvider(MemoryProvider):
             }
         )
         self._enqueue(content, record_meta)
+
+    def write_memory(
+        self,
+        action: str,
+        target: str,
+        content: str = "",
+        *,
+        old_text: str = "",
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
+        if target not in {"memory", "user"}:
+            return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
+        if action not in {"add", "replace", "remove"}:
+            return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
+        content = str(content or "").strip()
+        old_text = str(old_text or "").strip()
+        if action in {"add", "replace"} and not content:
+            return tool_error("Content is required for this memory action.", success=False)
+        if action in {"replace", "remove"} and not old_text:
+            return tool_error("old_text is required for this memory action.", success=False)
+        if not self._store:
+            return tool_error("Milvus provider is not initialized", success=False)
+        include_types = ["user_profile"] if target == "user" else ["curated_memory"]
+        if action == "remove":
+            removed = self._store.delete_by_text(old_text, include_types=include_types)
+            if not removed:
+                return tool_error(f"No Milvus memory matched '{old_text}'.", success=False)
+            return json.dumps(
+                {
+                    "success": True,
+                    "target": target,
+                    "message": "Entry removed from Milvus memory.",
+                    "removed": removed,
+                    "mode": self._mode,
+                    "markdown_mirror": self._markdown_mirror,
+                },
+                ensure_ascii=False,
+            )
+        removed = 0
+        if action == "replace":
+            removed = self._store.delete_by_text(old_text, include_types=include_types)
+            if not removed:
+                return tool_error(f"No Milvus memory matched '{old_text}'.", success=False)
+
+        record_meta = self._base_metadata(
+            session_id=(metadata or {}).get("session_id") or self._session_id
+        )
+        record_meta.update(
+            {
+                "memory_type": "user_profile" if target == "user" else "curated_memory",
+                "source": "memory_tool",
+                "target": target,
+                "action": action,
+                "old_text": old_text or "",
+                "provenance": dict(metadata or {}),
+            }
+        )
+        record_id = self._store.insert_record(content, record_meta)
+        return json.dumps(
+            {
+                "success": True,
+                "target": target,
+                "message": "Entry stored in Milvus memory.",
+                "id": record_id,
+                "entry_count": None,
+                "entries": [content],
+                "mode": self._mode,
+                "markdown_mirror": self._markdown_mirror,
+                "removed": removed,
+            },
+            ensure_ascii=False,
+        )
+
+    def build_stable_memory_block(self, max_chars: int = 3000) -> str:
+        if self._mode != "exclusive" or not self._store:
+            return ""
+        try:
+            results = self._store.list_records(
+                include_types=["user_profile", "curated_memory"],
+                limit=50,
+            )
+        except Exception as exc:
+            logger.debug("Milvus stable memory block failed: %s", exc, exc_info=True)
+            return ""
+        if not results:
+            return ""
+
+        user_items: list[SearchResult] = []
+        memory_items: list[SearchResult] = []
+        for result in results:
+            if result.metadata.get("memory_type") == "user_profile":
+                user_items.append(result)
+            else:
+                memory_items.append(result)
+
+        parts = ["Milvus persistent memory:"]
+        used = len(parts[0])
+
+        def add_section(title: str, items: list[SearchResult]) -> None:
+            nonlocal used
+            if not items:
+                return
+            section_lines = [title]
+            for idx, item in enumerate(items, 1):
+                text = sanitize_context(item.text).strip()
+                if not text:
+                    continue
+                line = f"{idx}. {text[:700].rstrip()}"
+                block_size = len(line) + 1
+                if used + len(title) + block_size > max_chars:
+                    break
+                section_lines.append(line)
+                used += block_size
+            if len(section_lines) > 1:
+                parts.append("\n".join(section_lines))
+                used += len(title)
+
+        add_section("User profile:", user_items)
+        add_section("Long-term memory:", memory_items)
+        return "\n\n".join(parts) if len(parts) > 1 else ""
+
+    def import_markdown_memory(self, memory_text: str = "", user_text: str = "") -> dict[str, Any]:
+        if not self._store:
+            return {"success": False, "error": "Milvus provider is not initialized"}
+        report = {"memory": 0, "user": 0, "skipped_duplicate": 0, "failed": 0}
+        seen: set[tuple[str, str]] = set()
+        for target, raw in (("memory", memory_text), ("user", user_text)):
+            for entry in _split_markdown_entries(raw):
+                key = (target, " ".join(entry.lower().split()))
+                if key in seen:
+                    report["skipped_duplicate"] += 1
+                    continue
+                seen.add(key)
+                payload = json.loads(
+                    self.write_memory(
+                        "add",
+                        target,
+                        entry,
+                        metadata={
+                            "source": "migration",
+                            "tool_name": "milvus_import",
+                        },
+                    )
+                )
+                if payload.get("success"):
+                    report[target] += 1
+                else:
+                    report["failed"] += 1
+        report["success"] = report["failed"] == 0
+        return report
+
+    def export_markdown_memory(self) -> dict[str, Any]:
+        if not self._store:
+            return {"success": False, "error": "Milvus provider is not initialized"}
+        records = self._store.list_records(
+            include_types=["user_profile", "curated_memory"],
+            limit=200,
+        )
+        memory_entries: list[str] = []
+        user_entries: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for record in records:
+            target = "user" if record.metadata.get("memory_type") == "user_profile" else "memory"
+            text = sanitize_context(record.text).strip()
+            if not text:
+                continue
+            key = (target, " ".join(text.lower().split()))
+            if key in seen:
+                continue
+            seen.add(key)
+            if target == "user":
+                user_entries.append(text)
+            else:
+                memory_entries.append(text)
+        return {
+            "success": True,
+            "memory": "\n§\n".join(memory_entries),
+            "user": "\n§\n".join(user_entries),
+            "memory_count": len(memory_entries),
+            "user_count": len(user_entries),
+        }
 
     def on_session_switch(
         self,
@@ -439,6 +635,8 @@ class MilvusMemoryProvider(MemoryProvider):
         configured = self._config.top_k if self._config else 8
         if self._mode == "mirror":
             return max(1, min(configured, 4))
+        if self._mode == "exclusive":
+            return max(1, min(configured, 16))
         if self._mode == "primary":
             return max(1, min(configured, 12))
         return max(1, min(configured, 8))
@@ -447,6 +645,8 @@ class MilvusMemoryProvider(MemoryProvider):
         configured = self._config.max_chars if self._config else 3000
         if self._mode == "mirror":
             return max(500, min(configured, 1500))
+        if self._mode == "exclusive":
+            return max(2500, configured)
         if self._mode == "primary":
             return max(2000, configured)
         return configured

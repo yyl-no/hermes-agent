@@ -72,7 +72,8 @@ def test_normalize_memory_mode_rejects_unknown_values():
     assert normalize_memory_mode("mirror") == "mirror"
     assert normalize_memory_mode("HYBRID") == "hybrid"
     assert normalize_memory_mode("primary") == "primary"
-    assert normalize_memory_mode("exclusive") == "mirror"
+    assert normalize_memory_mode("exclusive") == "exclusive"
+    assert normalize_memory_mode("invalid") == "mirror"
     assert normalize_memory_mode("") == "mirror"
 
 
@@ -88,7 +89,7 @@ def test_milvus_json_mode_is_loaded_and_normalized(tmp_path):
     assert cfg.mode == "primary"
 
 
-def test_milvus_invalid_json_mode_falls_back_to_mirror(tmp_path):
+def test_milvus_exclusive_json_mode_is_loaded(tmp_path):
     (tmp_path / "milvus.json").write_text(
         json.dumps({"uri": "mock://milvus", "mode": "exclusive"}),
         encoding="utf-8",
@@ -96,7 +97,7 @@ def test_milvus_invalid_json_mode_falls_back_to_mirror(tmp_path):
 
     cfg = load_config(tmp_path)
 
-    assert cfg.mode == "mirror"
+    assert cfg.mode == "exclusive"
 
 
 def test_provider_initialize_accepts_memory_mode_and_markdown_mirror():
@@ -115,12 +116,12 @@ def test_provider_initialize_accepts_memory_mode_and_markdown_mirror():
     provider.shutdown()
 
 
-def test_provider_invalid_memory_mode_falls_back_to_mirror():
+def test_provider_exclusive_memory_mode_is_supported():
     provider, _store = _provider("primary")
 
     provider.initialize("stage3-session", memory_mode="exclusive")
 
-    assert provider.mode == "mirror"
+    assert provider.mode == "exclusive"
     provider.shutdown()
 
 
@@ -149,5 +150,5 @@ def test_prefetch_mode_controls_recall_budget():
 def test_run_agent_init_passes_memory_mode_controls_to_provider():
     source = inspect.getsource(AIAgent.__init__)
 
-    assert '"memory_mode": mem_config.get("mode", "mirror")' in source
-    assert '"markdown_mirror": mem_config.get("markdown_mirror", True)' in source
+    assert '"memory_mode": self._memory_provider_mode' in source
+    assert '"markdown_mirror": self._memory_markdown_mirror' in source

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_MEMORY_MODES = {"mirror", "hybrid", "primary"}
+VALID_MEMORY_MODES = {"mirror", "hybrid", "primary", "exclusive"}
 
 
 @dataclass

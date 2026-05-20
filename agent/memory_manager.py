@@ -280,6 +280,26 @@ class MemoryManager:
                 )
         return "\n\n".join(blocks)
 
+    def build_stable_memory_block(self, max_chars: int = 3000) -> str:
+        """Collect stable long-term memory blocks from providers.
+
+        Exclusive memory modes use this as the replacement for Markdown
+        MEMORY.md / USER.md prompt injection. Provider failures are best-effort
+        and do not prevent the agent from starting.
+        """
+        blocks = []
+        for provider in self._providers:
+            try:
+                block = provider.build_stable_memory_block(max_chars=max_chars)
+                if block and block.strip():
+                    blocks.append(block)
+            except Exception as e:
+                logger.warning(
+                    "Memory provider '%s' build_stable_memory_block() failed: %s",
+                    provider.name, e,
+                )
+        return "\n\n".join(blocks)
+
     # -- Prefetch / recall ---------------------------------------------------
 
     def prefetch_all(self, query: str, *, session_id: str = "") -> str:
@@ -372,6 +392,37 @@ class MemoryManager:
                 provider.name, tool_name, e,
             )
             return tool_error(f"Memory tool '{tool_name}' failed: {e}")
+
+    def write_memory(
+        self,
+        action: str,
+        target: str,
+        content: str = "",
+        *,
+        old_text: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Write durable memory through the configured external provider."""
+        provider = next((p for p in self._providers if p.name != "builtin"), None)
+        if provider is None:
+            return tool_error("No external memory provider is active", success=False)
+        try:
+            return provider.write_memory(
+                action,
+                target,
+                content,
+                old_text=old_text,
+                metadata=dict(metadata or {}),
+            )
+        except NotImplementedError as e:
+            return tool_error(str(e), success=False)
+        except Exception as e:
+            logger.error(
+                "Memory provider '%s' write_memory failed: %s",
+                provider.name, e,
+                exc_info=True,
+            )
+            return tool_error(f"Memory provider write failed: {e}", success=False)
 
     # -- Lifecycle hooks -----------------------------------------------------
 
