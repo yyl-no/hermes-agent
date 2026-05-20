@@ -2008,6 +2008,8 @@ class AIAgent:
                             "platform": platform or "cli",
                             "hermes_home": str(get_hermes_home()),
                             "agent_context": "primary",
+                            "memory_mode": mem_config.get("mode", "mirror"),
+                            "markdown_mirror": mem_config.get("markdown_mirror", True),
                         }
                         # Thread session title for memory provider scoping
                         # (e.g. honcho uses this to derive chat-scoped session keys)

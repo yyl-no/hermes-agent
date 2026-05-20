@@ -20,10 +20,20 @@ from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
 from .client import MilvusClientWrapper
-from .config import MilvusConfig, load_config, write_config
+from .config import MilvusConfig, load_config, normalize_memory_mode, write_config
 from .store import MilvusMemoryStore, SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+def _as_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 SEARCH_SCHEMA = {
@@ -89,6 +99,8 @@ class MilvusMemoryProvider(MemoryProvider):
         self._workspace = ""
         self._user_id = ""
         self._chat_id = ""
+        self._mode = normalize_memory_mode(config.mode if config else "mirror")
+        self._markdown_mirror = True
         self._write_queue: Queue[tuple[str, dict[str, Any]]] = Queue()
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
@@ -98,6 +110,14 @@ class MilvusMemoryProvider(MemoryProvider):
     @property
     def name(self) -> str:
         return "milvus"
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def markdown_mirror(self) -> bool:
+        return self._markdown_mirror
 
     def is_available(self) -> bool:
         cfg = self._config or load_config()
@@ -113,6 +133,10 @@ class MilvusMemoryProvider(MemoryProvider):
         self._workspace = kwargs.get("agent_workspace") or kwargs.get("workspace") or ""
         self._user_id = kwargs.get("user_id") or ""
         self._chat_id = kwargs.get("chat_id") or ""
+        self._mode = normalize_memory_mode(
+            kwargs.get("memory_mode") or self._config.mode
+        )
+        self._markdown_mirror = _as_bool(kwargs.get("markdown_mirror"), True)
         self._store.initialize()
         self._start_worker()
 
@@ -123,16 +147,18 @@ class MilvusMemoryProvider(MemoryProvider):
             include_types = self._config.include_types if self._config else None
             if not include_types:
                 include_types = ["curated_memory", "turn", "summary"]
+            top_k = self._prefetch_top_k()
             results = self._store.search(
                 query,
-                top_k=self._config.top_k if self._config else 8,
+                top_k=top_k,
                 include_types=include_types,
             )
             rendered = self._render_results(results)
             with self._lock:
                 self._last_prefetch = rendered
             logger.debug(
-                "Milvus prefetch query chars=%d results=%d context chars=%d",
+                "Milvus prefetch mode=%s query chars=%d results=%d context chars=%d",
+                self._mode,
                 len(query),
                 len(results),
                 len(rendered),
@@ -375,7 +401,7 @@ class MilvusMemoryProvider(MemoryProvider):
     def _render_results(self, results: List[SearchResult]) -> str:
         if not results:
             return ""
-        max_chars = self._config.max_chars if self._config else 3000
+        max_chars = self._prefetch_max_chars()
         per_result_chars = min(700, max(120, max_chars // 2))
         parts = ["Milvus recalled memory:"]
         used = len(parts[0])
@@ -408,6 +434,22 @@ class MilvusMemoryProvider(MemoryProvider):
             parts.append(block)
             used += len(block)
         return "\n\n".join(parts) if len(parts) > 1 else ""
+
+    def _prefetch_top_k(self) -> int:
+        configured = self._config.top_k if self._config else 8
+        if self._mode == "mirror":
+            return max(1, min(configured, 4))
+        if self._mode == "primary":
+            return max(1, min(configured, 12))
+        return max(1, min(configured, 8))
+
+    def _prefetch_max_chars(self) -> int:
+        configured = self._config.max_chars if self._config else 3000
+        if self._mode == "mirror":
+            return max(500, min(configured, 1500))
+        if self._mode == "primary":
+            return max(2000, configured)
+        return configured
 
     @staticmethod
     def _result_to_dict(result: SearchResult) -> Dict[str, Any]:

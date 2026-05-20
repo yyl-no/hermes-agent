@@ -1101,6 +1101,14 @@ DEFAULT_CONFIG = {
         # "hindsight", "holographic", "retaindb", "byterover".
         # Only ONE external provider is allowed at a time.
         "provider": "",
+        # External memory provider strategy:
+        #   mirror  = built-in memory remains primary; provider is additive
+        #   hybrid  = built-in memory + provider recall both active
+        #   primary = provider recall is the main read path; built-in remains fallback
+        "mode": "mirror",
+        # Keep writing built-in Markdown memory while external providers mirror writes.
+        # Stage 3 keeps this true so users can always fall back to official memory.
+        "markdown_mirror": True,
     },
 
     # Subagent delegation — override the provider:model used by delegate_task

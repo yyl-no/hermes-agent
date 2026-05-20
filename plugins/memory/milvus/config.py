@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 
+VALID_MEMORY_MODES = {"mirror", "hybrid", "primary"}
+
+
 @dataclass
 class MilvusConfig:
     uri: str = ""
@@ -25,6 +28,11 @@ class MilvusConfig:
     include_types: list[str] = field(
         default_factory=lambda: ["curated_memory", "turn", "summary"]
     )
+
+
+def normalize_memory_mode(value: Any, default: str = "mirror") -> str:
+    mode = str(value or default or "mirror").strip().lower()
+    return mode if mode in VALID_MEMORY_MODES else "mirror"
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -93,7 +101,7 @@ def load_config(hermes_home: str | Path | None = None) -> MilvusConfig:
         top_k=max(1, min(_as_int(data.get("top_k"), 8), 50)),
         max_chars=max(500, _as_int(data.get("max_chars"), 3000)),
         min_score=_as_float(data.get("min_score"), 0.35),
-        mode=str(data.get("mode", "mirror") or "mirror"),
+        mode=normalize_memory_mode(data.get("mode")),
         include_types=list(include_types),
     )
 
@@ -108,4 +116,3 @@ def write_config(values: dict[str, Any], hermes_home: str | Path) -> None:
             existing = {}
     existing.update(values)
     path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
-
