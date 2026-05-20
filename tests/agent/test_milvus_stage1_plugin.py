@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import argparse
 from pathlib import Path
 
 
@@ -12,8 +13,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from plugins.memory.milvus import MilvusMemoryProvider
+from plugins.memory.milvus.cli import register_cli
 from plugins.memory.milvus.config import MilvusConfig
-from plugins.memory.milvus.store import SearchResult
+from plugins.memory.milvus.store import MilvusMemoryStore, SearchResult
 
 
 class FakeStore:
@@ -21,6 +23,7 @@ class FakeStore:
         self.initialized = False
         self.closed = False
         self.inserted = []
+        self.deleted = []
         self.search_calls = []
         self.results = []
 
@@ -37,6 +40,10 @@ class FakeStore:
     def search(self, query, **kwargs):
         self.search_calls.append((query, kwargs))
         return list(self.results)
+
+    def delete_by_text(self, old_text, **kwargs):
+        self.deleted.append((old_text, kwargs))
+        return 1
 
 
 def _provider(fake_store=None):
@@ -109,10 +116,50 @@ def test_memory_tool_write_is_mirrored_as_curated_memory():
     assert len(fake.inserted) == 1
     text, metadata = fake.inserted[0]
     assert text == "User prefers concise answers."
-    assert metadata["memory_type"] == "curated_memory"
+    assert metadata["memory_type"] == "user_profile"
     assert metadata["source"] == "memory_tool"
     assert metadata["target"] == "user"
     assert metadata["provenance"]["tool_name"] == "memory"
+    provider.shutdown()
+
+
+def test_memory_tool_replace_deletes_stale_milvus_memory_before_insert():
+    fake = FakeStore()
+    provider = _provider(fake)
+    provider.initialize("session-1", platform="cli")
+
+    provider.on_memory_write(
+        "replace",
+        "memory",
+        "New project convention.",
+        metadata={"old_text": "Old project convention", "session_id": "session-1"},
+    )
+    provider._write_queue.join()
+
+    assert fake.deleted == [
+        ("Old project convention", {"include_types": ["curated_memory"]})
+    ]
+    assert fake.inserted[0][0] == "New project convention."
+    provider.shutdown()
+
+
+def test_memory_tool_remove_deletes_milvus_memory_without_insert():
+    fake = FakeStore()
+    provider = _provider(fake)
+    provider.initialize("session-1", platform="cli")
+
+    provider.on_memory_write(
+        "remove",
+        "user",
+        "",
+        metadata={"old_text": "User prefers old style"},
+    )
+    provider._write_queue.join()
+
+    assert fake.deleted == [
+        ("User prefers old style", {"include_types": ["user_profile"]})
+    ]
+    assert fake.inserted == []
     provider.shutdown()
 
 
@@ -178,6 +225,78 @@ def test_milvus_remember_tool_writes_immediately():
     assert metadata["source"] == "milvus_remember"
     assert metadata["tags"] == ["test"]
     provider.shutdown()
+
+
+class FakeMilvusClient:
+    def __init__(self):
+        self.created = []
+        self.indexes = []
+        self.loaded = []
+
+    def has_collection(self, collection_name):
+        return False
+
+    def create_collection(self, **kwargs):
+        self.created.append(kwargs)
+
+    def create_index(self, **kwargs):
+        self.indexes.append(kwargs)
+
+    def load_collection(self, **kwargs):
+        self.loaded.append(kwargs)
+
+
+class FakeClientWrapper:
+    def __init__(self, client):
+        self.client = client
+
+    def connect(self):
+        return self.client
+
+    def close(self):
+        pass
+
+
+def test_store_initialization_creates_collection_index_and_loads():
+    cfg = MilvusConfig(
+        uri="mock://milvus",
+        collection="hermes_milvus_memories",
+        embedding_dimension=384,
+    )
+    client = FakeMilvusClient()
+    store = MilvusMemoryStore(cfg, client=FakeClientWrapper(client))
+
+    store.initialize()
+
+    assert client.created == [
+        {
+            "collection_name": "hermes_milvus_memories",
+            "dimension": 384,
+            "metric_type": "COSINE",
+            "auto_id": False,
+        }
+    ]
+    assert client.indexes == [
+        {
+            "collection_name": "hermes_milvus_memories",
+            "index_params": {
+                "metric_type": "COSINE",
+                "index_type": "HNSW",
+                "params": {"M": 16, "efConstruction": 200},
+            },
+        }
+    ]
+    assert client.loaded == [{"collection_name": "hermes_milvus_memories"}]
+
+
+def test_milvus_cli_registers_healthcheck_on_command_parser():
+    parser = argparse.ArgumentParser()
+
+    register_cli(parser)
+    args = parser.parse_args(["--healthcheck"])
+
+    assert args.healthcheck is True
+    assert callable(args.func)
 
 
 if __name__ == "__main__":

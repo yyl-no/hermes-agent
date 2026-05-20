@@ -1982,8 +1982,15 @@ class AIAgent:
                 self._memory_enabled = mem_config.get("memory_enabled", False)
                 self._user_profile_enabled = mem_config.get("user_profile_enabled", False)
                 self._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
-                _use_markdown_memory = self._memory_provider_mode != "exclusive" or self._memory_fallback_to_markdown
-                if _use_markdown_memory and (self._memory_enabled or self._user_profile_enabled):
+                _use_markdown_memory = (
+                    self._memory_provider_mode != "exclusive"
+                    or self._memory_fallback_to_markdown
+                )
+                if _use_markdown_memory and (
+                    self._memory_enabled
+                    or self._user_profile_enabled
+                    or self._memory_fallback_to_markdown
+                ):
                     from tools.memory_tool import MemoryStore
                     self._memory_store = MemoryStore(
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
@@ -4500,14 +4507,34 @@ class AIAgent:
             task_id=effective_task_id,
             tool_call_id=tool_call_id,
         )
+        if function_args.get("old_text"):
+            metadata["old_text"] = function_args.get("old_text")
         if self._external_memory_exclusive_active():
-            return self._memory_manager.write_memory(
+            result = self._memory_manager.write_memory(
                 action or "",
                 target,
                 function_args.get("content") or "",
                 old_text=function_args.get("old_text") or "",
                 metadata=metadata,
             )
+            if (
+                getattr(self, "_memory_fallback_to_markdown", True)
+                and getattr(self, "_memory_store", None)
+            ):
+                try:
+                    payload = json.loads(result)
+                except Exception:
+                    payload = {"success": False}
+                if not payload.get("success"):
+                    from tools.memory_tool import memory_tool as _memory_tool
+                    return _memory_tool(
+                        action=action,
+                        target=target,
+                        content=function_args.get("content"),
+                        old_text=function_args.get("old_text"),
+                        store=self._memory_store,
+                    )
+            return result
 
         from tools.memory_tool import memory_tool as _memory_tool
         result = _memory_tool(
@@ -4518,7 +4545,11 @@ class AIAgent:
             store=self._memory_store,
         )
         # Bridge: notify external memory provider of built-in memory writes
-        if self._memory_manager and action in {"add", "replace"}:
+        try:
+            _memory_write_success = bool(json.loads(result).get("success"))
+        except Exception:
+            _memory_write_success = False
+        if self._memory_manager and _memory_write_success and action in {"add", "replace", "remove"}:
             try:
                 self._memory_manager.on_memory_write(
                     action or "",
@@ -6156,6 +6187,7 @@ class AIAgent:
                     volatile_parts.append(user_block)
 
         # External memory provider system prompt block (additive to built-in)
+        _ext_mem_block = ""
         if self._memory_manager:
             try:
                 if self._external_memory_exclusive_active():
@@ -6166,6 +6198,21 @@ class AIAgent:
                     volatile_parts.append(_ext_mem_block)
             except Exception:
                 pass
+
+        if (
+            self._external_memory_exclusive_active()
+            and not _ext_mem_block
+            and self._memory_fallback_to_markdown
+            and self._memory_store
+        ):
+            if self._memory_enabled:
+                mem_block = self._memory_store.format_for_system_prompt("memory")
+                if mem_block:
+                    volatile_parts.append(mem_block)
+            if self._user_profile_enabled:
+                user_block = self._memory_store.format_for_system_prompt("user")
+                if user_block:
+                    volatile_parts.append(user_block)
 
         from hermes_time import now as _hermes_now
         now = _hermes_now()

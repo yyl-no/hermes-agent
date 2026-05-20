@@ -4,9 +4,8 @@ from __future__ import annotations
 
 
 def register_cli(subparser):
-    parser = subparser.add_parser("milvus", help="Manage Milvus memory provider")
-    parser.add_argument("--healthcheck", action="store_true", help="Check config/deps")
-    parser.set_defaults(func=_handle)
+    subparser.add_argument("--healthcheck", action="store_true", help="Check config/deps")
+    subparser.set_defaults(func=_handle)
 
 
 def _handle(args):
@@ -20,4 +19,3 @@ def _handle(args):
         print(f"collection: {cfg.collection}")
         return
     print("Use --healthcheck to verify Milvus memory configuration.")
-

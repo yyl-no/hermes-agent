@@ -4,6 +4,11 @@ This directory contains the Hermes Milvus memory provider. In `exclusive`
 mode, Hermes uses Milvus as the primary long-term semantic memory backend while
 leaving the official SQLite session store and FTS5 session search intact.
 
+This fork ships Milvus as an in-tree provider for convenience. Upstream Hermes
+policy no longer accepts new providers under `plugins/memory/`; if you want to
+submit this integration upstream, publish it as a standalone memory-provider
+plugin or pip package instead.
+
 Milvus replaces the long-term semantic memory path, not the whole Hermes
 storage system:
 

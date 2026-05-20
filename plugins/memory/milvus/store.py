@@ -11,7 +11,7 @@ from typing import Any
 from .client import MilvusClientWrapper
 from .config import MilvusConfig
 from .embeddings import EmbeddingClient, ensure_dimension
-from .schema import TEXT_FIELD, VECTOR_FIELD
+from .schema import TEXT_FIELD, VECTOR_FIELD, build_index_params
 
 
 @dataclass
@@ -43,6 +43,7 @@ class MilvusMemoryStore:
                 metric_type="COSINE",
                 auto_id=False,
             )
+            _safe_create_index(client, self.config.collection)
         _safe_load_collection(client, self.config.collection)
         self._initialized = True
 
@@ -266,6 +267,22 @@ def _safe_load_collection(client: Any, collection_name: str) -> None:
     except TypeError:
         try:
             load(collection_name)
+        except Exception:
+            return
+    except Exception:
+        return
+
+
+def _safe_create_index(client: Any, collection_name: str) -> None:
+    create_index = getattr(client, "create_index", None)
+    if not callable(create_index):
+        return
+    index_params = build_index_params()
+    try:
+        create_index(collection_name=collection_name, index_params=index_params)
+    except TypeError:
+        try:
+            create_index(collection_name, index_params)
         except Exception:
             return
     except Exception:

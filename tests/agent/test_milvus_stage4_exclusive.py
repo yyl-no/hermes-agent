@@ -175,11 +175,14 @@ def test_provider_import_and_export_markdown_memory():
 
 
 class FakeExternalMemoryManager:
-    def __init__(self):
+    def __init__(self, *, write_result=None):
         self.writes = []
+        self.write_result = write_result
 
     def write_memory(self, action, target, content, *, old_text="", metadata=None):
         self.writes.append((action, target, content, old_text, metadata or {}))
+        if self.write_result is not None:
+            return self.write_result
         return json.dumps({"success": True, "target": target, "entries": [content]})
 
 
@@ -211,6 +214,85 @@ def test_agent_memory_tool_routes_to_external_provider_in_exclusive_mode():
         "memory",
         "Exclusive routed memory.",
     )
+
+
+class FakeMarkdownMemoryStore:
+    def __init__(self):
+        self.calls = []
+
+    def add(self, target, content):
+        self.calls.append(("add", target, content))
+        return {"success": True, "target": target, "entries": [content]}
+
+    def replace(self, target, old_text, new_content):
+        self.calls.append(("replace", target, old_text, new_content))
+        return {"success": True, "target": target, "entries": [new_content]}
+
+    def remove(self, target, old_text):
+        self.calls.append(("remove", target, old_text))
+        return {"success": True, "target": target, "entries": []}
+
+
+def test_agent_exclusive_memory_tool_falls_back_to_markdown_on_provider_error():
+    agent = AIAgent.__new__(AIAgent)
+    agent._memory_provider_mode = "exclusive"
+    agent._memory_fallback_to_markdown = True
+    agent._memory_manager = FakeExternalMemoryManager(
+        write_result=json.dumps({"success": False, "error": "Milvus down"})
+    )
+    agent._memory_store = FakeMarkdownMemoryStore()
+    agent.session_id = "stage4-agent"
+    agent._parent_session_id = ""
+    agent.platform = "cli"
+    agent._memory_write_origin = "assistant_tool"
+    agent._memory_write_context = "foreground"
+
+    raw = agent._handle_memory_tool_call(
+        {
+            "action": "add",
+            "target": "memory",
+            "content": "Fallback Markdown memory.",
+        }
+    )
+    payload = json.loads(raw)
+
+    assert payload["success"] is True
+    assert agent._memory_store.calls == [
+        ("add", "memory", "Fallback Markdown memory.")
+    ]
+
+
+class FakeNonExclusiveMemoryManager:
+    def __init__(self):
+        self.events = []
+
+    def on_memory_write(self, action, target, content, metadata=None):
+        self.events.append((action, target, content, dict(metadata or {})))
+
+
+def test_agent_nonexclusive_memory_tool_mirrors_remove_with_old_text():
+    agent = AIAgent.__new__(AIAgent)
+    agent._memory_provider_mode = "hybrid"
+    agent._memory_manager = FakeNonExclusiveMemoryManager()
+    agent._memory_store = FakeMarkdownMemoryStore()
+    agent.session_id = "stage4-agent"
+    agent._parent_session_id = ""
+    agent.platform = "cli"
+    agent._memory_write_origin = "assistant_tool"
+    agent._memory_write_context = "foreground"
+
+    raw = agent._handle_memory_tool_call(
+        {
+            "action": "remove",
+            "target": "memory",
+            "old_text": "Stale Milvus memory",
+        }
+    )
+    payload = json.loads(raw)
+
+    assert payload["success"] is True
+    assert agent._memory_manager.events[0][0:3] == ("remove", "memory", "")
+    assert agent._memory_manager.events[0][3]["old_text"] == "Stale Milvus memory"
 
 
 def test_agent_exclusive_system_prompt_skips_markdown_block():

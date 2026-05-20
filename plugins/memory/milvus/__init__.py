@@ -221,18 +221,31 @@ class MilvusMemoryProvider(MemoryProvider):
         content: str,
         metadata: Dict[str, Any] | None = None,
     ) -> None:
-        if action not in {"add", "replace"} or not content:
+        if action not in {"add", "replace", "remove"}:
+            return
+        if not self._store:
+            return
+        metadata = dict(metadata or {})
+        old_text = str(metadata.get("old_text") or "").strip()
+        include_types = ["user_profile"] if target == "user" else ["curated_memory"]
+        if action in {"replace", "remove"} and old_text:
+            try:
+                self._store.delete_by_text(old_text, include_types=include_types)
+            except Exception as exc:
+                logger.debug("Milvus mirror delete failed: %s", exc, exc_info=True)
+        if action == "remove" or not content:
             return
         record_meta = self._base_metadata(
-            session_id=(metadata or {}).get("session_id") or self._session_id
+            session_id=metadata.get("session_id") or self._session_id
         )
         record_meta.update(
             {
-                "memory_type": "curated_memory",
+                "memory_type": "user_profile" if target == "user" else "curated_memory",
                 "source": "memory_tool",
                 "target": target or "memory",
                 "action": action,
-                "provenance": dict(metadata or {}),
+                "old_text": old_text,
+                "provenance": metadata,
             }
         )
         self._enqueue(content, record_meta)
